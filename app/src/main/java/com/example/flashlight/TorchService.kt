@@ -12,10 +12,13 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
+import android.view.Display
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 
@@ -29,36 +32,53 @@ class TorchService : Service() {
     }
 
     private lateinit var cm: CameraManager
+    private lateinit var dm: DisplayManager
+    private val handler = Handler(Looper.getMainLooper())
     private var camId: String? = null
     private var torchOn = false
-    private var onWhenScreenWentOff = false
+    private var torchOnAt = 0L
+    private var lastDisplayOn = true
 
-    // Keeps our state in sync if the torch is changed by something else.
     private val torchCallback = object : CameraManager.TorchCallback() {
         override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
             if (cameraId == camId) {
+                if (enabled && !torchOn) torchOnAt = SystemClock.elapsedRealtime()
                 torchOn = enabled
                 refreshNotification()
             }
         }
     }
 
-    // Power button with screen off -> screen turns on -> we switch the torch off.
+    // The screen woke up (power button, etc.): switch the torch off.
+    // Two independent triggers are used because some phones are unreliable with one of them.
+    private fun screenTurnedOn() {
+        if (torchOn && SystemClock.elapsedRealtime() - torchOnAt > 1000) {
+            setTorch(false)
+        }
+    }
+
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                Intent.ACTION_SCREEN_OFF -> onWhenScreenWentOff = torchOn
-                Intent.ACTION_SCREEN_ON -> {
-                    if (onWhenScreenWentOff && torchOn) setTorch(false)
-                    onWhenScreenWentOff = false
-                }
-            }
+            if (intent.action == Intent.ACTION_SCREEN_ON) screenTurnedOn()
+        }
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != Display.DEFAULT_DISPLAY) return
+            val display = dm.getDisplay(displayId) ?: return
+            val isOn = display.state == Display.STATE_ON
+            if (isOn && !lastDisplayOn) screenTurnedOn()
+            lastDisplayOn = isOn
         }
     }
 
     override fun onCreate() {
         super.onCreate()
         cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        dm = getSystemService(DisplayManager::class.java)
         camId = cm.cameraIdList.firstOrNull {
             cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
         }
@@ -72,18 +92,16 @@ class TorchService : Service() {
         val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(), type)
 
-        cm.registerTorchCallback(torchCallback, Handler(Looper.getMainLooper()))
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_SCREEN_ON)
-        }
-        registerReceiver(screenReceiver, filter) // must be registered in code, not the manifest
+        cm.registerTorchCallback(torchCallback, handler)
+        lastDisplayOn = dm.getDisplay(Display.DEFAULT_DISPLAY)?.state == Display.STATE_ON
+        dm.registerDisplayListener(displayListener, handler)
+        registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_TOGGLE -> setTorch(!torchOn)
-            ACTION_REFRESH -> refreshNotification() // re-posts if the user swiped it away
+            ACTION_REFRESH -> refreshNotification()
         }
         return START_STICKY
     }
@@ -91,6 +109,7 @@ class TorchService : Service() {
     private fun setTorch(on: Boolean) {
         val id = camId ?: return
         try {
+            if (on) torchOnAt = SystemClock.elapsedRealtime()
             cm.setTorchMode(id, on)
             torchOn = on
             refreshNotification()
@@ -115,9 +134,9 @@ class TorchService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_silent_mode_off) // replace with your own icon
+            .setSmallIcon(R.drawable.ic_torch)
             .setContentTitle("Flashlight")
-            .setContentText(if (torchOn) "On" else "Off")
+            .setContentText(if (torchOn) "On - tap to turn off" else "Off - tap to turn on")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -130,6 +149,7 @@ class TorchService : Service() {
 
     override fun onDestroy() {
         cm.unregisterTorchCallback(torchCallback)
+        dm.unregisterDisplayListener(displayListener)
         unregisterReceiver(screenReceiver)
         super.onDestroy()
     }
