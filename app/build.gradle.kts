@@ -25,6 +25,11 @@ android {
             enableV2Signing = true
         }
     }
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
 }
 
 dependencies {
