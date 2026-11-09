@@ -128,6 +128,14 @@ class TorchService : Service() {
             Intent(this, TorchService::class.java).setAction(ACTION_TOGGLE),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val openApp = PendingIntent.getActivity(
+            this, 3,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val toggleAction = NotificationCompat.Action.Builder(
+            0, if (torchOn) "Turn off" else "Turn on", toggle
+        ).setAuthenticationRequired(false).build() // works from the lock screen without unlocking
         val reappear = PendingIntent.getForegroundService(
             this, 2,
             Intent(this, TorchService::class.java).setAction(ACTION_REFRESH),
@@ -136,14 +144,14 @@ class TorchService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_torch)
             .setContentTitle("Flashlight")
-            .setContentText(if (torchOn) "On - tap to turn off" else "Off - tap to turn on")
+            .setContentText(if (torchOn) "On" else "Off")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setDeleteIntent(reappear)
-            .setContentIntent(toggle)
-            .addAction(0, if (torchOn) "Turn off" else "Turn on", toggle)
+            .setContentIntent(openApp)
+            .addAction(toggleAction)
             .build()
     }
 
